@@ -90,7 +90,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:32px;margin:0}
     <div id="exportBox" class="hidden">
       <div class="section-title">Speichern</div>
       <div class="card">
-        <div class="field">Dateiname<input type="text" id="fname" autocomplete="off"></div>
+        <div class="field">Dateiname
+          <div class="row"><input type="text" id="fname" autocomplete="off" style="flex:1"><button class="btn" id="ocrBtn" style="flex:none" aria-label="Titel erkennen">🔤</button></div>
+          <small id="ocrInfo" style="color:var(--muted)">Wird automatisch aus dem Titel der ersten Seite erkannt.</small></div>
         <div class="field">Seitenformat im PDF
           <select id="fmt">
             <option value="a4">A4 (zum Drucken)</option>
@@ -99,6 +101,9 @@ input[type=range]{width:100%;accent-color:var(--accent);height:32px;margin:0}
         </div>
         <div class="row" style="margin-bottom:10px">
           <button class="btn primary" id="pdfShare">📤 PDF in Google Drive speichern</button>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <button class="btn" id="omrShare">🎼 Für Notenerkennung teilen</button>
         </div>
         <div class="row" style="margin-bottom:10px">
           <button class="btn" id="pdfBtn">⬇️ PDF herunterladen</button>
@@ -506,7 +511,10 @@ async function acceptCurrent(){
   if(p.mode==='gray'){const b=await new Promise(r=>cv.toBlob(r,'image/jpeg',.9));page.jpeg=new Uint8Array(await b.arrayBuffer());}
   else page.bits=packBits(a.bw,a.w,a.h);
   page.thumb=makeThumb(cv);
+  {const sh=Math.round(cv.height*0.22),sc=Math.min(1,1800/cv.width),t=mk(Math.round(cv.width*sc),Math.round(sh*sc));
+   t.getContext('2d').drawImage(cv,0,0,cv.width,sh,0,0,t.width,t.height);page.titleCanvas=t;}
   if(J.editIdx!=null)S.pages[J.editIdx]=page;else S.pages.push(page);
+  if(S.pages[0]===page&&!S.nameManual)detectTitle(false);
   Object.assign(S.settings,{mode:p.mode,white:p.white,gamma:p.gamma,thresh:p.thresh,despeckle:p.despeckle});saveSettings();
   J.gray=null;
 }
@@ -596,17 +604,72 @@ $('#camInput').onchange=e=>{const f=[...e.target.files];e.target.value='';if(f.l
 $('#galInput').onchange=e=>{const f=[...e.target.files];e.target.value='';if(f.length)addFiles(f);};
 $('#autoAccept').checked=S.settings.autoAccept;$('#autoAccept').onchange=e=>{S.settings.autoAccept=e.target.checked;saveSettings();};
 $('#fmt').value=S.settings.fmt;$('#fmt').onchange=e=>{S.settings.fmt=e.target.value;saveSettings();};
-(()=>{const d=new Date(),z=v=>String(v).padStart(2,'0');$('#fname').value=`Noten ${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;})();
+function setDefaultName(){const d=new Date(),z=v=>String(v).padStart(2,'0');$('#fname').value=`Noten ${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;}setDefaultName();
 $('#pdfBtn').onclick=async()=>{if(!S.pages.length)return;showBusy('PDF wird erstellt …');await tick();
   try{const blob=await buildPDF(S.pages,S.settings.fmt);hideBusy();await saveFile(baseName()+'.pdf',blob);}catch(e){hideBusy();toast('PDF-Fehler: '+e.message);}};
 $('#pdfShare').onclick=async()=>{if(!S.pages.length)return;showBusy('PDF wird erstellt …');await tick();let file;
   try{const blob=await buildPDF(S.pages,S.settings.fmt);file=new File([blob],baseName()+'.pdf',{type:'application/pdf'});}catch(e){hideBusy();toast('PDF-Fehler: '+e.message);return;}
-  hideBusy();
+  hideBusy();await shareFile(file,'Das PDF ist fertig. Jetzt in Google Drive speichern?');
+};
+async function shareFile(file,question){
   if(!(navigator.canShare&&navigator.canShare({files:[file]}))){toast('Teilen nicht möglich – PDF wird heruntergeladen');await saveFile(file.name,file);return;}
   const doShare=async()=>{try{await navigator.share({files:[file],title:file.name});return true;}
     catch(e){if(e.name==='AbortError')return true;if(e.name==='NotAllowedError')return false;toast('Teilen fehlgeschlagen: '+e.message);return true;}};
-  if(!(await doShare())&&await ask('Das PDF ist fertig. Jetzt in Google Drive speichern?','In Drive'))await doShare();
+  if(!(await doShare())&&await ask(question,'Teilen'))await doShare();
+}
+/* S/W in voller Auflösung für Notenerkennung (PlayScore, Soundslice …) */
+async function loadGray(file){
+  const src=await decode(file),W0=src.naturalWidth||src.width,H0=src.naturalHeight||src.height;
+  const sc=Math.min(1,4000/Math.max(W0,H0)),W=Math.round(W0*sc),H=Math.round(H0*sc);
+  const c=mk(W,H),ctx=c.getContext('2d',{willReadFrequently:true});ctx.drawImage(src,0,0,W,H);
+  const d=ctx.getImageData(0,0,W,H).data,g=new Uint8Array(W*H);
+  for(let i=0,j=0;i<g.length;i++,j+=4)g[i]=(d[j]*77+d[j+1]*150+d[j+2]*29)>>8;
+  c.width=c.height=1;if(src.close)src.close();return{g,W,H};
+}
+async function bwPageForOMR(p){
+  if(p.mode==='bw')return{mode:'bw',w:p.w,h:p.h,bits:p.bits};
+  const L=await loadGray(p.file),wp=warp(L.g,L.W,L.H,p.quad,3600);
+  let n=enhanceLines(normalize(wp.g,wp.w,wp.h),wp.w,wp.h,1.5),w=wp.w,h=wp.h;
+  for(let r=0;r<(p.rot%4);r++){n=rot90(n,w,h);[w,h]=[h,w];}
+  const T=Math.round((S.settings.thresh||0.82)*200),bw=new Uint8Array(w*h);
+  for(let i=0;i<bw.length;i++)bw[i]=n[i]<T?1:0;
+  despeckle(bw,w,h,Math.max(3,Math.round(Math.pow(Math.max(w,h)/1000,2)*2.5)));
+  return{mode:'bw',w,h,bits:packBits(bw,w,h)};
+}
+$('#omrShare').onclick=async()=>{if(!S.pages.length)return;const n=S.pages.length,out=[];
+  try{for(let i=0;i<n;i++){showBusy(`Seite ${i+1} von ${n} für Notenerkennung …`);await tick();out.push(await bwPageForOMR(S.pages[i]));}
+    showBusy('PDF wird erstellt …');await tick();
+    const blob=await buildPDF(out,'orig'),file=new File([blob],baseName()+'.pdf',{type:'application/pdf'});
+    hideBusy();await shareFile(file,'Das S/W-PDF ist fertig. Jetzt an PlayScore o. Ä. teilen?');
+  }catch(e){hideBusy();toast('Fehler: '+e.message);}
 };
+/* ---------- Titel-Erkennung (OCR) ---------- */
+let ocrWorker=null,ocrBusy=false;
+function loadScript(src){return new Promise((res,rej)=>{const e=document.createElement('script');e.src=src;e.onload=res;e.onerror=()=>rej(new Error('Laden fehlgeschlagen'));document.head.appendChild(e);});}
+async function getOCR(){
+  if(ocrWorker)return ocrWorker;
+  if(!window.Tesseract)await loadScript('https://cdn.jsdelivr.net/npm/tesseract.js@5/dist/tesseract.min.js');
+  ocrWorker=await Tesseract.createWorker('deu');return ocrWorker;
+}
+function cleanTitle(t){return t.replace(/[|_~^°“”„"«»*#<>\\\/:;?!]+/g,' ').replace(/[^\p{L}\p{N} .,'&()-]/gu,'').replace(/\s+/g,' ').replace(/^[\s.,'-]+|[\s.,'-]+$/g,'').slice(0,70);}
+async function detectTitle(manual){
+  const p=S.pages[0];if(!p||!p.titleCanvas||ocrBusy)return;
+  ocrBusy=true;const info=$('#ocrInfo');info.textContent='Titel wird erkannt …';
+  try{
+    const w=await getOCR();const {data}=await w.recognize(p.titleCanvas,{},{text:true,blocks:true});
+    let lines=data.lines||[];
+    if(!lines.length&&data.blocks)for(const b of data.blocks)for(const pa of b.paragraphs||[])lines.push(...(pa.lines||[]));
+    let best=null,bh=0;
+    for(const l of lines){const t=cleanTitle(l.text||'');const letters=(t.match(/\p{L}/gu)||[]).length;
+      if(letters<3||(l.confidence||0)<45)continue;const h=l.bbox.y1-l.bbox.y0;if(h>bh){bh=h;best=t;}}
+    if(best&&(manual||!S.nameManual)){$('#fname').value=best;S.nameManual=false;info.textContent='Titel erkannt – du kannst ihn noch ändern.';}
+    else if(!best)info.textContent='Kein Titel gefunden – bitte Namen eintippen.';
+    else info.textContent='Titel erkannt: „'+best+'“ (dein Name bleibt).';
+  }catch(e){info.textContent='Titelerkennung nicht möglich (Internet nötig).';}
+  ocrBusy=false;
+}
+$('#ocrBtn').onclick=()=>{if(!S.pages.length){toast('Zuerst eine Seite aufnehmen');return;}detectTitle(true);};
+$('#fname').addEventListener('input',()=>{S.nameManual=true;});
 async function pageImageBlob(p){
   if(p.mode==='gray')return new Blob([p.jpeg],{type:'image/jpeg'});
   const c=mk(p.w,p.h),ctx=c.getContext('2d'),img=ctx.createImageData(p.w,p.h),u=new Uint32Array(img.data.buffer),rb=(p.w+7)>>3;
@@ -616,7 +679,7 @@ async function pageImageBlob(p){
 $('#imgBtn').onclick=async()=>{const n=S.pages.length,base=baseName();
   for(let i=0;i<n;i++){const p=S.pages[i];showBusy(`Bild ${i+1} von ${n} …`);await tick();const b=await pageImageBlob(p);hideBusy();
     const ok=await saveFile(`${base} ${String(i+1).padStart(2,'0')}.${p.mode==='gray'?'jpg':'png'}`,b);if(!ok)break;}};
-$('#clearBtn').onclick=async()=>{if(await ask('Alle Seiten verwerfen?','Verwerfen')){S.pages=[];renderPages();}};
+$('#clearBtn').onclick=async()=>{if(await ask('Alle Seiten verwerfen?','Verwerfen')){S.pages=[];S.nameManual=false;setDefaultName();$('#ocrInfo').textContent='Wird automatisch aus dem Titel der ersten Seite erkannt.';renderPages();}};
 window.addEventListener('beforeunload',e=>{if(S.pages.length){e.preventDefault();e.returnValue='';}});
 renderPages();
 </script>
