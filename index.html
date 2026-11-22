@@ -98,7 +98,10 @@ input[type=range]{width:100%;accent-color:var(--accent);height:32px;margin:0}
           </select>
         </div>
         <div class="row" style="margin-bottom:10px">
-          <button class="btn primary" id="pdfBtn">📄 PDF speichern</button>
+          <button class="btn primary" id="pdfShare">📤 PDF in Google Drive speichern</button>
+        </div>
+        <div class="row" style="margin-bottom:10px">
+          <button class="btn" id="pdfBtn">⬇️ PDF herunterladen</button>
           <button class="btn" id="imgBtn">🖼️ Als Bilder</button>
         </div>
         <div class="row"><button class="btn danger" id="clearBtn">Alle Seiten verwerfen</button></div>
@@ -596,6 +599,14 @@ $('#fmt').value=S.settings.fmt;$('#fmt').onchange=e=>{S.settings.fmt=e.target.va
 (()=>{const d=new Date(),z=v=>String(v).padStart(2,'0');$('#fname').value=`Noten ${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())}`;})();
 $('#pdfBtn').onclick=async()=>{if(!S.pages.length)return;showBusy('PDF wird erstellt …');await tick();
   try{const blob=await buildPDF(S.pages,S.settings.fmt);hideBusy();await saveFile(baseName()+'.pdf',blob);}catch(e){hideBusy();toast('PDF-Fehler: '+e.message);}};
+$('#pdfShare').onclick=async()=>{if(!S.pages.length)return;showBusy('PDF wird erstellt …');await tick();let file;
+  try{const blob=await buildPDF(S.pages,S.settings.fmt);file=new File([blob],baseName()+'.pdf',{type:'application/pdf'});}catch(e){hideBusy();toast('PDF-Fehler: '+e.message);return;}
+  hideBusy();
+  if(!(navigator.canShare&&navigator.canShare({files:[file]}))){toast('Teilen nicht möglich – PDF wird heruntergeladen');await saveFile(file.name,file);return;}
+  const doShare=async()=>{try{await navigator.share({files:[file],title:file.name});return true;}
+    catch(e){if(e.name==='AbortError')return true;if(e.name==='NotAllowedError')return false;toast('Teilen fehlgeschlagen: '+e.message);return true;}};
+  if(!(await doShare())&&await ask('Das PDF ist fertig. Jetzt in Google Drive speichern?','In Drive'))await doShare();
+};
 async function pageImageBlob(p){
   if(p.mode==='gray')return new Blob([p.jpeg],{type:'image/jpeg'});
   const c=mk(p.w,p.h),ctx=c.getContext('2d'),img=ctx.createImageData(p.w,p.h),u=new Uint32Array(img.data.buffer),rb=(p.w+7)>>3;
